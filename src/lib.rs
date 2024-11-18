@@ -43,10 +43,7 @@
 //! - Ctrl-C: Send an `Interrupt` event
 
 use std::{
-	io::{self, stdout, Stdout, Write},
-	ops::DerefMut,
-	pin::Pin,
-	task::{Context, Poll},
+	collections::VecDeque, io::{self, stdout, BufRead, Stdout, Write}, ops::DerefMut, path::Path, pin::Pin, task::{Context, Poll}
 };
 
 use crossterm::{
@@ -54,7 +51,6 @@ use crossterm::{
 	terminal::{self, disable_raw_mode, Clear},
 	QueueableCommand,
 };
-use futures_channel::mpsc;
 use futures_util::{pin_mut, ready, select, AsyncWrite, FutureExt, StreamExt};
 use thingbuf::mpsc::{errors::TrySendError, Receiver, Sender};
 use thiserror::Error;
@@ -189,10 +185,7 @@ pub struct Readline {
 	raw_term: Stdout,
 	event_stream: EventStream, // Stream of events
 	line_receiver: Receiver<Vec<u8>>,
-
 	line: LineState, // Current line
-
-	history_sender: mpsc::UnboundedSender<String>,
 }
 
 impl Readline {
@@ -203,14 +196,12 @@ impl Readline {
 		terminal::enable_raw_mode()?;
 
 		let line = LineState::new(prompt, terminal::size()?);
-		let history_sender = line.history.sender.clone();
 
 		let mut readline = Readline {
 			raw_term: stdout(),
 			event_stream: EventStream::new(),
 			line_receiver,
 			line,
-			history_sender,
 		};
 		readline.line.render(&mut readline.raw_term)?;
 		readline.raw_term.queue(terminal::EnableLineWrap)?;
@@ -297,14 +288,50 @@ impl Readline {
 					},
 					None => return Err(ReadlineError::Closed),
 				},
-				_ = self.line.history.update().fuse() => {}
 			}
 		}
 	}
 
 	/// Add a line to the input history
 	pub fn add_history_entry(&mut self, entry: String) -> Option<()> {
-		self.history_sender.unbounded_send(entry).ok()
+		self.line.history.add_entry(entry);
+		Some(())
+	}
+
+	/// Retrieves the history contents.
+	pub fn get_history(&self) -> &VecDeque<String> {
+		self.line.history.get_entries()
+	}
+
+	/// Replaces the history contents.
+	pub fn set_history(&mut self, history: VecDeque<String>) {
+		self.line.history.set_entries(history);
+	}
+
+	/// Loads the history from the given file.
+	pub fn load_history(&mut self, path: impl AsRef<Path>) -> std::io::Result<()> {
+		let file = std::fs::File::open(path)?;
+		let reader = std::io::BufReader::new(file);
+
+		self.set_history(VecDeque::new());
+
+		for line in reader.lines() {
+			self.add_history_entry(line?);
+		}
+
+		Ok(())
+	}
+
+	/// Saves the history to the given file.
+	pub fn save_history(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+		let file = std::fs::File::create(path)?;
+		let mut writer = std::io::BufWriter::new(file);
+
+		for line in self.get_history() {
+			writeln!(writer, "{line}")?;
+		}
+
+		Ok(())
 	}
 }
 
